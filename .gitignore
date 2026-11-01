@@ -1,0 +1,5 @@
+*.exe
+*.ini
+*.pdb
+.e2e/
+tests/bin/
