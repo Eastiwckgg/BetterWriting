@@ -10,6 +10,7 @@ namespace BetterWriting
         public string Text;
         public bool ToggleCapsLock;
         public Lang SwitchLayout;
+        public int CaretLeft, CaretRight, DeleteRight;
         public bool Replace { get { return Text != null; } }
     }
 
@@ -26,8 +27,12 @@ namespace BetterWriting
         long lastSpaceMs = long.MinValue / 2;
         string undoScreen, undoOriginal;
         Lang undoLayout;
+        readonly List<char> closers = new List<char>();
+        bool swallowHeldSpace;
 
         public Config Cfg;
+        public Func<DateTime> Now = () => DateTime.Now;
+        public Func<string> ClipboardText = () => "";
         public Lang Lang = Lang.Ru;
         public bool CapsLock;
         public bool BothLayouts = true;
@@ -48,6 +53,8 @@ namespace BetterWriting
             secure = false;
             autoCapIndex = -1;
             lastSpaceMs = long.MinValue / 2;
+            closers.Clear();
+            swallowHeldSpace = false;
             ClearUndo();
             Version++;
         }
@@ -83,6 +90,13 @@ namespace BetterWriting
         {
             Version++;
             ClearUndo();
+            if (swallowHeldSpace && repeat && c == ' ')
+            {
+                var swallowed = default(EngineAction);
+                swallowed.Text = "";
+                return swallowed;
+            }
+            swallowHeldSpace = false;
             if (!Active)
             {
                 buf.Append(c);
@@ -93,6 +107,17 @@ namespace BetterWriting
             string before = buf.ToString();
             var act = default(EngineAction);
             bool autoCapOnly = false;
+            char closer = '\0';
+
+            if (c == ' ' && TryLeaveBracket(nowMs, repeat))
+            {
+                act.Backspaces = 1;
+                act.Text = "";
+                act.CaretRight = 1;
+                userOverride = false;
+                Trim();
+                return act;
+            }
 
             if (c == ' ' && TryDoubleSpace(nowMs, repeat))
             {
@@ -106,8 +131,16 @@ namespace BetterWriting
 
                 if (!repeat && IsBoundary(c)) FixWord(c == ' ' ? Boundary.Space : Boundary.Punct, ref act);
 
+                if (Cfg.AutoBrackets && TryStepOverCloser(outChar, before, ref act))
+                {
+                    userOverride = false;
+                    Trim();
+                    return act;
+                }
+
                 if (Cfg.AutoSpace && char.IsLetter(c)) AddSpaceAfterPunct(c);
                 if (Cfg.AutoSpace && c == '(') AddSpaceBeforeBracket();
+                if (Cfg.AutoBrackets && !repeat) closer = PairFor(c, outChar);
 
                 if (char.IsLetter(outChar) && char.IsLower(outChar) && capAllowed && CapPending)
                 {
@@ -120,7 +153,42 @@ namespace BetterWriting
             if (c == ' ') lastSpaceMs = nowMs;
             userOverride = false;
 
+            if (closer != '\0')
+            {
+                closers.Add(closer);
+                Diff(before, buf.ToString(), ref act);
+                act.Text += closer;
+                act.CaretLeft = 1;
+                Trim();
+                return act;
+            }
+
             Finish(before, before + c, ref act, !autoCapOnly);
+            return act;
+        }
+
+        public bool WaitsForHeldSpace
+        {
+            get
+            {
+                int n = buf.Length;
+                return Active && Cfg.AutoBrackets && Cfg.BracketExit == "hold" && closers.Count > 0
+                    && n >= 2 && buf[n - 1] == ' ' && !IsSpace(buf[n - 2]);
+            }
+        }
+
+        public EngineAction OnSpaceHeld()
+        {
+            var act = default(EngineAction);
+            if (!WaitsForHeldSpace) return act;
+            Version++;
+            ClearUndo();
+            TryLeaveBracket(0, true);
+            act.Backspaces = 1;
+            act.Text = "";
+            act.CaretRight = 1;
+            userOverride = false;
+            Trim();
             return act;
         }
 
@@ -150,6 +218,17 @@ namespace BetterWriting
                 ClearUndo();
                 autoCapIndex = -1;
                 Trim();
+                return act;
+            }
+
+            if (closers.Count > 0 && buf.Length > 0 && OpenerOf(closers[closers.Count - 1]) == buf[buf.Length - 1])
+            {
+                buf.Length -= 1;
+                closers.RemoveAt(closers.Count - 1);
+                autoCapIndex = -1;
+                act.Backspaces = 1;
+                act.Text = "";
+                act.DeleteRight = 1;
                 return act;
             }
 
@@ -220,6 +299,72 @@ namespace BetterWriting
             return true;
         }
 
+        bool TryLeaveBracket(long nowMs, bool repeat)
+        {
+            int n = buf.Length;
+            if (!Cfg.AutoBrackets || closers.Count == 0 || n < 2 || buf[n - 1] != ' ' || IsSpace(buf[n - 2])) return false;
+            if (Cfg.BracketExit == "hold")
+            {
+                if (!repeat) return false;
+                swallowHeldSpace = true;
+            }
+            else if (Cfg.BracketExit != "double" || repeat || nowMs - lastSpaceMs > Cfg.DoubleSpaceIntervalMs) return false;
+            buf.Length = n - 1;
+            buf.Append(closers[closers.Count - 1]);
+            closers.RemoveAt(closers.Count - 1);
+            lastSpaceMs = long.MinValue / 2;
+            return true;
+        }
+
+        bool TryStepOverCloser(char typed, string before, ref EngineAction act)
+        {
+            int at = closers.LastIndexOf(typed);
+            if (at < 0) return false;
+            string typedSoFar = buf.ToString();
+            int steps = closers.Count - at;
+            for (int i = closers.Count - 1; i >= at; i--) buf.Append(closers[i]);
+            closers.RemoveRange(at, steps);
+            Diff(before, typedSoFar, ref act);
+            act.CaretRight = steps;
+            return true;
+        }
+
+        char PairFor(char typed, char output)
+        {
+            int n = buf.Length;
+            char prev = n == 0 ? ' ' : buf[n - 1];
+            bool freeStart = n == 0 || char.IsWhiteSpace(prev) || IsOpener(prev);
+            if (!freeStart || prev == output) return '\0';
+            if (typed == '"') return output == '«' ? '»' : output == '„' ? '“' : output == '"' ? '"' : '\0';
+            switch (output)
+            {
+                case '(': return ')';
+                case '[': return ']';
+                case '{': return '}';
+                case '«': return '»';
+                case '„': return '“';
+                case '“': return '”';
+                case '‘': return '’';
+            }
+            return '\0';
+        }
+
+        static char OpenerOf(char closer)
+        {
+            switch (closer)
+            {
+                case ')': return '(';
+                case ']': return '[';
+                case '}': return '{';
+                case '»': return '«';
+                case '“': return '„';
+                case '”': return '“';
+                case '’': return '‘';
+                case '"': return '"';
+            }
+            return '\0';
+        }
+
         static bool IsTightPunct(char c) { return c == ',' || c == '.' || c == '!' || c == '?'; }
 
         void RemoveSpaceBefore()
@@ -269,7 +414,7 @@ namespace BetterWriting
         {
             int n = buf.Length;
             char prev = n == 0 ? ' ' : buf[n - 1];
-            bool open = n == 0 || char.IsWhiteSpace(prev) || IsOpener(prev) || prev == '(';
+            bool afterSpace = n == 0 || char.IsWhiteSpace(prev);
             int depth = 0;
             bool innerOpen = false;
             for (int i = 0; i < n; i++)
@@ -279,8 +424,9 @@ namespace BetterWriting
                 else if (buf[i] == '„') innerOpen = true;
                 else if (buf[i] == '“') innerOpen = false;
             }
-            if (open) return depth > 0 ? '„' : '«';
-            return innerOpen ? '“' : '»';
+            if (afterSpace) return depth > 0 ? '„' : '«';
+            if (depth > 0) return innerOpen ? '“' : '»';
+            return IsOpener(prev) ? '«' : '»';
         }
 
         enum Boundary { Space, Punct, Enter }
@@ -313,10 +459,54 @@ namespace BetterWriting
         {
             string text;
             if (!Cfg.SnippetList.TryGetValue(trigger, out text) || text.Length == 0) return false;
+            text = RenderVariables(text);
+            if (text.Length == 0) return false;
             if (char.IsUpper(trigger[0]) && char.IsLower(text[0])) text = char.ToUpper(text[0]) + text.Substring(1);
             buf.Length = start;
             buf.Append(text);
             return true;
+        }
+
+        string RenderVariables(string text)
+        {
+            if (text.IndexOf('{') < 0) return text;
+            var sb = new StringBuilder();
+            int i = 0;
+            while (i < text.Length)
+            {
+                int open = text.IndexOf('{', i);
+                int close = open < 0 ? -1 : text.IndexOf('}', open);
+                if (close < 0)
+                {
+                    sb.Append(text, i, text.Length - i);
+                    break;
+                }
+                sb.Append(text, i, open - i);
+                string value = VariableValue(text.Substring(open + 1, close - open - 1));
+                sb.Append(value ?? text.Substring(open, close - open + 1));
+                i = close + 1;
+            }
+            return sb.ToString();
+        }
+
+        string VariableValue(string spec)
+        {
+            int colon = spec.IndexOf(':');
+            string name = (colon < 0 ? spec : spec.Substring(0, colon)).Trim();
+            string format = colon < 0 ? null : spec.Substring(colon + 1);
+            string lower = name.ToLowerInvariant();
+            try
+            {
+                if (lower == "date" || lower == "дата") return Now().ToString(format ?? "d");
+                if (lower == "time" || lower == "время") return Now().ToString(format ?? "HH:mm");
+            }
+            catch (FormatException) { return null; }
+            if (lower == "clipboard" || lower == "буфер")
+            {
+                string clip = (ClipboardText() ?? "").Replace("\r\n", "\n");
+                return clip.Length > 4000 ? clip.Substring(0, 4000) : clip;
+            }
+            return null;
         }
 
         bool TryLayout(ref EngineAction act)
@@ -339,6 +529,7 @@ namespace BetterWriting
 
             string lower = core.ToLowerInvariant();
             string origLower = origCore.ToLowerInvariant();
+            if (Cfg.LayoutIgnore.Contains(origLower) || Cfg.LayoutIgnore.Contains(lower) || Cfg.CustomTypos.ContainsKey(origLower)) return false;
             if (core.Length == 2)
             {
                 var shortTo = other == Lang.Ru ? ShortRu : ShortEn;
@@ -402,7 +593,8 @@ namespace BetterWriting
             string w = WordBefore(buf.Length, out s, true);
             if (w == null) return false;
             string fix;
-            if (!TypoList.TryGetValue(w.ToLowerInvariant(), out fix) || fix == w.ToLowerInvariant()) return false;
+            if (!Cfg.CustomTypos.TryGetValue(w, out fix) && !TypoList.TryGetValue(w.ToLowerInvariant(), out fix)) return false;
+            if (fix == w.ToLowerInvariant()) return false;
             if (w.Length > 1 && w.ToUpperInvariant() == w) fix = fix.ToUpperInvariant();
             else if (char.IsUpper(w[0])) fix = char.ToUpper(fix[0]) + fix.Substring(1);
             buf.Length = s;
@@ -425,7 +617,58 @@ namespace BetterWriting
             "кто кого кому кем ком что чего чему чем чём " +
             "какой какая какое какие какого какому каким каком какую каких какими " +
             "чей чья чьё чье чьи чьего чьему чьим чьём чьем чьей чью чьих чьими " +
-            "где куда откуда когда как почему зачем отчего сколько скольких скольким");
+            "где куда откуда когда как почему зачем отчего сколько скольких скольким " +
+            "такой такая такое такие такого такому таким таком такую таких такими");
+        static readonly HashSet<string> GluedToOnly = Set("вообще наконец");
+        static readonly HashSet<string> GluedPairs = Set(
+            "по-моему по-твоему по-своему по-нашему по-вашему по-разному по-другому по-новому по-старому по-прежнему " +
+            "по-настоящему по-хорошему по-плохому по-иному по-всякому по-любому по-русски по-английски по-немецки " +
+            "по-французски по-испански по-итальянски по-китайски по-японски по-украински по-человечески по-дружески " +
+            "во-первых во-вторых в-третьих в-четвёртых в-четвертых в-пятых в-шестых в-седьмых в-восьмых в-девятых в-десятых " +
+            "из-за из-под всё-таки все-таки опять-таки довольно-таки " +
+            "чуть-чуть еле-еле едва-едва вот-вот только-только давным-давно более-менее худо-бедно мало-помалу " +
+            "крест-накрест как-никак нет-нет ну-ну видимо-невидимо волей-неволей всего-навсего мало-мальски туда-сюда точь-в-точь " +
+            "дай-ка давай-ка ну-ка смотри-ка гляди-ка глянь-ка скажи-ка иди-ка пойдём-ка пойдем-ка попробуй-ка налей-ка " +
+            "подожди-ка покажи-ка возьми-ка сделай-ка послушай-ка");
+        static readonly Dictionary<string, string> GluedWords = BuildGlued();
+
+        static Dictionary<string, string> BuildGlued()
+        {
+            var d = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (string w in GluedPairs) d[w.Replace("-", "")] = w;
+            return d;
+        }
+
+        static int GluedHyphenAt(string l)
+        {
+            foreach (string tail in new[] { "нибудь", "либо", "то" })
+            {
+                if (!l.EndsWith(tail, StringComparison.Ordinal)) continue;
+                string head = l.Substring(0, l.Length - tail.Length);
+                if (Pronouns.Contains(head) || (tail == "то" && GluedToOnly.Contains(head))) return head.Length;
+            }
+            if ((l.StartsWith("кое", StringComparison.Ordinal) || l.StartsWith("кой", StringComparison.Ordinal)) && Pronouns.Contains(l.Substring(3))) return 3;
+            return -1;
+        }
+
+        bool TryGluedHyphen()
+        {
+            int s;
+            string w = WordBefore(buf.Length, out s);
+            if (w == null || w.IndexOf('-') >= 0) return false;
+            string l = w.ToLowerInvariant();
+            string full;
+            if (GluedWords.TryGetValue(l, out full))
+            {
+                for (int i = 0; i < full.Length; i++)
+                    if (full[i] == '-') buf.Insert(s + i, '-');
+                return true;
+            }
+            int at = GluedHyphenAt(l);
+            if (at <= 0) return false;
+            buf.Insert(s + at, '-');
+            return true;
+        }
         static readonly HashSet<string> Taki = Set("всё все так опять довольно наконец прямо вправду верно");
         static readonly HashSet<string> Prepositions = Set(
             "с со у в во о об обо на за к ко по из от до для про при без над под через перед между");
@@ -433,12 +676,14 @@ namespace BetterWriting
             "первых вторых третьих четвёртых четвертых пятых шестых седьмых восьмых девятых десятых");
         static readonly HashSet<string> HyphenPairs = Set(
             "чуть|чуть еле|еле давным|давно более|менее худо|бедно мало|помалу волей|неволей крест|накрест " +
-            "как|никак да|да нет|нет ну|ну видимо|невидимо");
+            "как|никак да|да нет|нет ну|ну видимо|невидимо едва|едва вот|вот только|только всего|навсего мало|мальски туда|сюда " +
+            "вообще|то наконец|то по|прежнему по|разному");
         static readonly HashSet<string> AfterPoAdverb = Set("не ни же бы ли и а но");
 
         bool TryHyphen(bool punct)
         {
             if (buf.Length == 0 || !char.IsLetter(buf[buf.Length - 1])) return false;
+            if (TryGluedHyphen()) return true;
 
             int s2, s1 = -1, s0 = -1;
             string w2 = WordBefore(buf.Length, out s2);
@@ -473,6 +718,8 @@ namespace BetterWriting
         bool ShouldCapitalizeAt(int end)
         {
             int i = end - 1;
+            if (Cfg.CapitalizeInBrackets && i >= 0 && (buf[i] == '(' || buf[i] == '[' || buf[i] == '{')
+                && (i == 0 || IsSpace(buf[i - 1]) || IsOpener(buf[i - 1]))) return true;
             bool sawSpace = false;
             while (i >= 0 && (IsSpace(buf[i]) || IsOpener(buf[i])))
             {
@@ -558,7 +805,7 @@ namespace BetterWriting
         static bool IsBoundary(char c)
         {
             return c == ' ' || c == '.' || c == ',' || c == '!' || c == '?' || c == ';' || c == ':'
-                || c == ')' || c == '»' || c == '"' || c == '…';
+                || c == ')' || c == ']' || c == '}' || c == '»' || c == '"' || c == '…';
         }
 
         static bool EndsWithAny(string w, params string[] ends)

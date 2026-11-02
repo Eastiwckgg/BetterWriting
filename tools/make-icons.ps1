@@ -1,28 +1,51 @@
 ﻿Add-Type -AssemblyName System.Drawing
 $root = Split-Path $PSScriptRoot
-$src = [Drawing.Bitmap]::FromFile((Join-Path $root 'assets\logo.png'))
+$src = [Drawing.Bitmap]::FromFile((Join-Path $root 'assets\logo-source.png'))
 
-$minX = $src.Width; $minY = $src.Height; $maxX = 0; $maxY = 0
-for ($y = 0; $y -lt $src.Height; $y += 2) { for ($x = 0; $x -lt $src.Width; $x += 2) {
-  if ($src.GetPixel($x, $y).A -gt 40) { if ($x -lt $minX) {$minX=$x}; if ($x -gt $maxX) {$maxX=$x}; if ($y -lt $minY) {$minY=$y}; if ($y -gt $maxY) {$maxY=$y} } } }
-$side = [Math]::Max($maxX - $minX, $maxY - $minY) + 2
-$crop = New-Object Drawing.Rectangle $minX, $minY, $side, $side
+$side = [int]($src.Width * 0.9)
+$cropX = [int](($src.Width - $side) / 2) + 8
+$cropY = [int](($src.Height - $side) / 2)
 
-function Render([int]$size, [bool]$gray) {
+function RoundedPath([int]$size) {
+  $d = [Math]::Round($size * 0.44, 2)
+  $path = New-Object Drawing.Drawing2D.GraphicsPath
+  $max = $size - $d
+  $path.AddArc(0, 0, $d, $d, 180, 90)
+  $path.AddArc($max, 0, $d, $d, 270, 90)
+  $path.AddArc($max, $max, $d, $d, 0, 90)
+  $path.AddArc(0, $max, $d, $d, 90, 90)
+  $path.CloseFigure()
+  return ,$path
+}
+
+function RenderBitmap([int]$size, [bool]$gray) {
   $bmp = New-Object Drawing.Bitmap $size, $size
   $g = [Drawing.Graphics]::FromImage($bmp)
-  $g.InterpolationMode = 'HighQualityBicubic'; $g.PixelOffsetMode = 'HighQuality'; $g.SmoothingMode = 'AntiAlias'
+  $g.InterpolationMode = 'HighQualityBicubic'; $g.PixelOffsetMode = 'HighQuality'; $g.SmoothingMode = 'AntiAlias'; $g.CompositingQuality = 'HighQuality'
   $attr = New-Object Drawing.Imaging.ImageAttributes
+  $attr.SetWrapMode('TileFlipXY')
   if ($gray) {
     $m = New-Object Drawing.Imaging.ColorMatrix
     $m.Matrix00 = 0.3; $m.Matrix01 = 0.3; $m.Matrix02 = 0.3
     $m.Matrix10 = 0.59; $m.Matrix11 = 0.59; $m.Matrix12 = 0.59
     $m.Matrix20 = 0.11; $m.Matrix21 = 0.11; $m.Matrix22 = 0.11
-    $m.Matrix33 = 0.55; $m.Matrix44 = 1
+    $m.Matrix33 = 0.7; $m.Matrix44 = 1
     $attr.SetColorMatrix($m)
   }
-  $g.DrawImage($src, (New-Object Drawing.Rectangle 0, 0, $size, $size), $crop.X, $crop.Y, $crop.Width, $crop.Height, 'Pixel', $attr)
-  $g.Dispose()
+  $tile = New-Object Drawing.Bitmap $size, $size
+  $t = [Drawing.Graphics]::FromImage($tile)
+  $t.InterpolationMode = 'HighQualityBicubic'; $t.PixelOffsetMode = 'HighQuality'; $t.CompositingQuality = 'HighQuality'
+  $t.DrawImage($src, (New-Object Drawing.Rectangle 0, 0, $size, $size), $cropX, $cropY, $side, $side, 'Pixel', $attr)
+  $t.Dispose()
+  $brush = New-Object Drawing.TextureBrush $tile
+  $path = RoundedPath $size
+  $g.FillPath($brush, $path)
+  $path.Dispose(); $brush.Dispose(); $tile.Dispose(); $g.Dispose()
+  return ,$bmp
+}
+
+function Render([int]$size, [bool]$gray) {
+  $bmp = RenderBitmap $size $gray
   $ms = New-Object IO.MemoryStream; $bmp.Save($ms, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
   return ,$ms.ToArray()
 }
@@ -45,5 +68,6 @@ function WriteIco([string]$path, [int[]]$sizes, [bool]$gray) {
 WriteIco (Join-Path $root 'src\app.ico') @(16, 20, 24, 32, 40, 48, 64, 256) $false
 WriteIco (Join-Path $root 'src\tray-off.ico') @(16, 20, 24, 32, 40, 48, 64) $true
 [IO.File]::WriteAllBytes((Join-Path $root 'src\logo.png'), (Render 128 $false))
+[IO.File]::WriteAllBytes((Join-Path $root 'assets\logo.png'), (Render 512 $false))
 $src.Dispose()
 'icons ok'

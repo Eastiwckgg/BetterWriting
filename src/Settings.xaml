@@ -380,6 +380,8 @@
       </StackPanel>
       <TextBlock x:Name="Footer" DockPanel.Dock="Bottom" Margin="14,0,8,0" FontSize="12" TextWrapping="Wrap"
                  Foreground="{DynamicResource TextTertiary}"/>
+      <Button x:Name="GithubLink" DockPanel.Dock="Bottom" Style="{StaticResource Link}" Content="GitHub"
+              HorizontalAlignment="Left" Margin="14,0,8,6"/>
       <StackPanel x:Name="Nav"/>
     </DockPanel>
 

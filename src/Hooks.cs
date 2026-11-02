@@ -21,6 +21,7 @@ namespace BetterWriting
         readonly INPUT[] inputs = new INPUT[256];
         readonly StringBuilder sb = new StringBuilder(1024);
         readonly uint selfPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+        readonly System.Windows.Forms.Timer holdTimer = new System.Windows.Forms.Timer { Interval = 200 };
 
         IntPtr kbHook, mouseHook, fgHook;
         IntPtr lastFg;
@@ -30,6 +31,17 @@ namespace BetterWriting
         Config baseCfg;
         bool fgIsSettings;
         EventWaitHandle demoFocus;
+        int lastHookTick;
+        string fgName;
+        int layoutSettleUntil;
+        int shownLang = -1;
+        int shownCaps = -1;
+
+        public event Action LayoutsChanged;
+        public event Action StateMayChange;
+        public event Action<string> IndicatorText;
+        public event Action<int, int> MouseButtonDown;
+        public event Action<int, int> RightButtonUp;
 
         public string ForegroundProcess { get; private set; }
 
@@ -37,9 +49,17 @@ namespace BetterWriting
         {
             this.engine = engine;
             baseCfg = engine.Cfg;
+            engine.ClipboardText = () => System.Windows.Forms.Clipboard.ContainsText() ? System.Windows.Forms.Clipboard.GetText() : "";
             kbProc = KeyboardProc;
             mouseProc = MouseProc;
             foregroundProc = OnForegroundEvent;
+            holdTimer.Tick += delegate
+            {
+                holdTimer.Stop();
+                if (!spaceHeld || GetForegroundWindow() != lastFg) return;
+                var leave = engine.OnSpaceHeld();
+                if (leave.Replace) Send(leave, 0);
+            };
         }
 
         public bool Installed { get { return kbHook != IntPtr.Zero; } }
@@ -52,7 +72,21 @@ namespace BetterWriting
             mouseHook = SetWindowsHookEx(WH_MOUSE_LL, mouseProc, mod, 0);
             fgHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero, foregroundProc, 0, 0, 0);
             lastFg = IntPtr.Zero;
+            lastHookTick = Environment.TickCount;
+            shownCaps = GetKeyState(VK_CAPITAL) & 1;
             if (baseCfg.LayoutFix) Dictionaries.Preload();
+        }
+
+        public void Watch()
+        {
+            var info = new LASTINPUTINFO { cbSize = Marshal.SizeOf(typeof(LASTINPUTINFO)) };
+            bool alive = kbHook != IntPtr.Zero && mouseHook != IntPtr.Zero;
+            if (alive && (!GetLastInputInfo(ref info) || unchecked((int)info.dwTime - lastHookTick) <= 2000)) return;
+            IntPtr fg = lastFg;
+            Uninstall();
+            Install();
+            lastFg = fg;
+            engine.Reset(false);
         }
 
         public void SetConfig(Config cfg)
@@ -96,12 +130,19 @@ namespace BetterWriting
 
         IntPtr MouseProc(int nCode, IntPtr wParam, IntPtr lParam)
         {
+            lastHookTick = Environment.TickCount;
             if (nCode >= 0)
             {
                 int msg = (int)wParam;
                 if (msg != WM_MOUSEMOVE)
                 {
-                    try { HandleMouse(msg); }
+                    try
+                    {
+                        HandleMouse(msg);
+                        int x = Marshal.ReadInt32(lParam, 0), y = Marshal.ReadInt32(lParam, 4);
+                        if (msg == WM_RBUTTONUP && RightButtonUp != null) RightButtonUp(x, y);
+                        if ((msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN) && MouseButtonDown != null) MouseButtonDown(x, y);
+                    }
                     catch { }
                 }
             }
@@ -138,6 +179,7 @@ namespace BetterWriting
             uint pid;
             fgThread = GetWindowThreadProcessId(fg, out pid);
             string name = ProcessName(pid);
+            fgName = name;
             if (pid != selfPid) ForegroundProcess = name;
             fgExcluded = pid == selfPid || (name != null && baseCfg.IsExcluded(name));
             engine.Cfg = baseCfg.ForApp(name);
@@ -155,10 +197,91 @@ namespace BetterWriting
             bool cap = allowStartCap && !fgIsDialog;
             engine.Reset(cap);
             if (cap && engine.Cfg.Capitalize && ActiveHere(fg)) RequestContext(true);
+            ApplyRememberedLayout(fg);
+        }
+
+        void ApplyRememberedLayout(IntPtr fg)
+        {
+            int current = (int)((long)GetKeyboardLayout(fgThread) & 0xFFFF);
+            layoutSettleUntil = Environment.TickCount + 200;
+            string saved;
+            if (baseCfg.LayoutPerApp && fgName != null && !fgIsSettings && ActiveHere(fg)
+                && baseCfg.AppLayouts.TryGetValue(fgName, out saved) && saved != current.ToString("X4"))
+            {
+                IntPtr target = FindLayoutById(saved);
+                if (target != IntPtr.Zero)
+                {
+                    PostMessage(fg, WM_INPUTLANGCHANGEREQUEST, IntPtr.Zero, target);
+                    layoutSettleUntil = Environment.TickCount + 700;
+                    shownLang = current;
+                    if (StateMayChange != null) StateMayChange();
+                    return;
+                }
+            }
+            shownLang = current;
+        }
+
+        void RememberLayout(IntPtr hkl)
+        {
+            if (!baseCfg.LayoutPerApp || fgName == null || fgIsSettings) return;
+            if (unchecked(Environment.TickCount - layoutSettleUntil) < 0) return;
+            string id = ((int)((long)hkl & 0xFFFF)).ToString("X4");
+            string saved;
+            if (baseCfg.AppLayouts.TryGetValue(fgName, out saved) && saved == id) return;
+            baseCfg.AppLayouts[fgName] = id;
+            if (LayoutsChanged != null) LayoutsChanged();
+        }
+
+        public void CheckIndicator()
+        {
+            int lang = (int)((long)GetKeyboardLayout(fgThread) & 0xFFFF);
+            int caps = GetKeyState(VK_CAPITAL) & 1;
+            bool langChanged = shownLang >= 0 && lang != shownLang;
+            bool capsChanged = shownCaps >= 0 && caps != shownCaps;
+            shownLang = lang;
+            shownCaps = caps;
+            if (!baseCfg.LayoutIndicator || IndicatorText == null || (!langChanged && !capsChanged)) return;
+            if (!ActiveHere(GetForegroundWindow())) return;
+            IndicatorText(capsChanged ? (caps != 0 ? "CAPS ON" : "CAPS OFF") : LangLabel(lang));
+        }
+
+        public void AfterExternalEdit()
+        {
+            engine.Reset(false);
+            if (ReadsAfterCursorMove && ActiveHere(GetForegroundWindow())) RequestContext(true);
+        }
+
+        public static string LangLabel(int langId)
+        {
+            int primary = langId & 0x3FF;
+            if (primary == 0x19) return "РУС";
+            if (primary == 0x09) return "ENG";
+            if (primary == 0x22) return "УКР";
+            if (primary == 0x23) return "БЕЛ";
+            try { return new System.Globalization.CultureInfo(langId).TwoLetterISOLanguageName.ToUpperInvariant(); }
+            catch (System.Globalization.CultureNotFoundException) { return langId.ToString("X4"); }
+        }
+
+        public void SendPaste()
+        {
+            var keys = new System.Collections.Generic.List<INPUT>();
+            if (Pressed(VK_MENU) || Pressed(VK_LWIN) || Pressed(VK_RWIN))
+            {
+                keys.Add(Key(0xFF, '\0', 0));
+                keys.Add(Key(0xFF, '\0', KEYEVENTF_KEYUP));
+            }
+            foreach (int vk in new[] { 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, VK_LWIN, VK_RWIN })
+                if (Pressed(vk)) keys.Add(Key(vk, '\0', KEYEVENTF_KEYUP));
+            keys.Add(Key(VK_CONTROL, '\0', 0));
+            keys.Add(Key(0x56, '\0', 0));
+            keys.Add(Key(0x56, '\0', KEYEVENTF_KEYUP));
+            keys.Add(Key(VK_CONTROL, '\0', KEYEVENTF_KEYUP));
+            SendInput((uint)keys.Count, keys.ToArray(), Marshal.SizeOf(typeof(INPUT)));
         }
 
         IntPtr KeyboardProc(int nCode, IntPtr wParam, IntPtr lParam)
         {
+            lastHookTick = Environment.TickCount;
             if (nCode >= 0)
             {
                 try
@@ -180,8 +303,17 @@ namespace BetterWriting
             if ((flags & LLKHF_INJECTED) != 0 && (extra == Magic || engine.Cfg.IgnoreInjected)) return false;
 
             bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-            if (vk == VK_SPACE && !down) { spaceHeld = false; return false; }
-            if (!down) return false;
+            if (vk == VK_SPACE && !down)
+            {
+                spaceHeld = false;
+                holdTimer.Stop();
+            }
+            if (!down)
+            {
+                if (StateMayChange != null && (vk == VK_SPACE || vk == VK_CAPITAL || vk == VK_LWIN || vk == VK_RWIN
+                    || (vk >= VK_SHIFT && vk <= VK_MENU) || (vk >= 0xA0 && vk <= 0xA5))) StateMayChange();
+                return false;
+            }
 
             IntPtr fg = GetForegroundWindow();
             if (fg != lastFg) OnForegroundChanged(fg, engine.Cfg.CapitalizeOnWindowSwitch);
@@ -262,9 +394,11 @@ namespace BetterWriting
             }
 
             char c = chars[0];
+            RememberLayout(hkl);
             bool capAllowed = char.IsLetter(c) && char.IsLower(c) && !wasDead && !IsPasswordFocus();
 
             var act = engine.OnChar(c, (long)GetTickCount64(), repeat, capAllowed);
+            if (vk == VK_SPACE && !repeat && engine.WaitsForHeldSpace) holdTimer.Start();
             if (!act.Replace) return false;
             Send(act, 0);
             return true;
@@ -282,6 +416,15 @@ namespace BetterWriting
         {
             IntPtr hkl = FindLayout(lang);
             if (hkl != IntPtr.Zero) PostMessage(lastFg, WM_INPUTLANGCHANGEREQUEST, IntPtr.Zero, hkl);
+        }
+
+        static IntPtr FindLayoutById(string id)
+        {
+            var list = new IntPtr[32];
+            int count = GetKeyboardLayoutList(list.Length, list);
+            for (int i = 0; i < count; i++)
+                if (((int)((long)list[i] & 0xFFFF)).ToString("X4") == id) return list[i];
+            return IntPtr.Zero;
         }
 
         static bool HasLayout(Lang lang) { return FindLayout(lang) != IntPtr.Zero; }
@@ -338,14 +481,15 @@ namespace BetterWriting
         void Send(EngineAction act, int vkAfter)
         {
             int k = 0;
-            for (int i = 0; i < act.Backspaces && k < inputs.Length - 8; i++)
+            int needed = (act.Backspaces + act.CaretLeft + act.CaretRight + act.DeleteRight + 9) * 2 + act.Text.Length * 4;
+            INPUT[] inputs = needed <= this.inputs.Length ? this.inputs : new INPUT[needed];
+            for (int i = 0; i < act.Backspaces; i++)
             {
                 inputs[k++] = Key(VK_BACK, '\0', 0);
                 inputs[k++] = Key(VK_BACK, '\0', KEYEVENTF_KEYUP);
             }
             foreach (char ch in act.Text)
             {
-                if (k >= inputs.Length - 8) break;
                 if (ch == '\n')
                 {
                     inputs[k++] = Key(VK_SHIFT, '\0', 0);
@@ -357,6 +501,34 @@ namespace BetterWriting
                 inputs[k++] = Key(0, ch, KEYEVENTF_UNICODE);
                 inputs[k++] = Key(0, ch, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
             }
+            var heldModifiers = new System.Collections.Generic.List<int>();
+            if (act.CaretLeft + act.CaretRight + act.DeleteRight > 0)
+            {
+                foreach (int vk in new[] { 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5 })
+                    if (Pressed(vk)) heldModifiers.Add(vk);
+                if (Pressed(VK_MENU))
+                {
+                    inputs[k++] = Key(0xFF, '\0', 0);
+                    inputs[k++] = Key(0xFF, '\0', KEYEVENTF_KEYUP);
+                }
+                foreach (int vk in heldModifiers) inputs[k++] = Key(vk, '\0', KEYEVENTF_KEYUP);
+            }
+            for (int i = 0; i < act.CaretLeft; i++)
+            {
+                inputs[k++] = Key(0x25, '\0', KEYEVENTF_EXTENDEDKEY);
+                inputs[k++] = Key(0x25, '\0', KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP);
+            }
+            for (int i = 0; i < act.CaretRight; i++)
+            {
+                inputs[k++] = Key(0x27, '\0', KEYEVENTF_EXTENDEDKEY);
+                inputs[k++] = Key(0x27, '\0', KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP);
+            }
+            for (int i = 0; i < act.DeleteRight; i++)
+            {
+                inputs[k++] = Key(0x2E, '\0', KEYEVENTF_EXTENDEDKEY);
+                inputs[k++] = Key(0x2E, '\0', KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP);
+            }
+            foreach (int vk in heldModifiers) inputs[k++] = Key(vk, '\0', 0);
             if (act.ToggleCapsLock)
             {
                 inputs[k++] = Key(VK_CAPITAL, '\0', 0);
@@ -369,6 +541,7 @@ namespace BetterWriting
             }
             SendInput((uint)k, inputs, Marshal.SizeOf(typeof(INPUT)));
             if (act.SwitchLayout != Lang.Other) SwitchLayout(act.SwitchLayout);
+            if ((act.SwitchLayout != Lang.Other || act.ToggleCapsLock) && StateMayChange != null) StateMayChange();
         }
 
         static INPUT Key(int vk, char ch, uint flags)

@@ -31,6 +31,63 @@ namespace BetterWriting
         [DllImport("user32.dll")]
         public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
         public const uint WM_INPUTLANGCHANGEREQUEST = 0x50;
+        public const uint ES_CONTINUOUS = 0x80000000, ES_SYSTEM_REQUIRED = 1, ES_DISPLAY_REQUIRED = 2;
+        public const uint ULW_ALPHA = 2;
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+        [DllImport("user32.dll")]
+        public static extern bool IsWindowVisible(IntPtr hwnd);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SIZE { public int Width, Height; }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct BLENDFUNCTION { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
+
+        [DllImport("user32.dll")]
+        public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr screenDc, ref POINT dst, ref SIZE size, IntPtr sourceDc, ref POINT src, int key, ref BLENDFUNCTION blend, uint flags);
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetDC(IntPtr hwnd);
+        [DllImport("user32.dll")]
+        public static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+        [DllImport("gdi32.dll")]
+        public static extern IntPtr CreateCompatibleDC(IntPtr dc);
+        [DllImport("gdi32.dll")]
+        public static extern bool DeleteDC(IntPtr dc);
+        [DllImport("gdi32.dll")]
+        public static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+        [DllImport("gdi32.dll")]
+        public static extern bool DeleteObject(IntPtr obj);
+        [DllImport("kernel32.dll")]
+        public static extern uint SetThreadExecutionState(uint flags);
+        public const int WM_HOTKEY = 0x312;
+        public const int WM_RBUTTONUP = 0x205;
+        public const uint WM_NCHITTEST = 0x84, SMTO_ABORTIFHUNG = 2, GA_ROOT = 2;
+        public const int HTCAPTION = 2, HTSYSMENU = 3, GWL_EXSTYLE = -20;
+        public const uint WS_EX_TOPMOST = 8, SWP_NOSIZE = 1, SWP_NOMOVE = 2, SWP_NOACTIVATE = 0x10, KEYEVENTF_EXTENDEDKEY = 1;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT { public int X, Y; }
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr WindowFromPoint(POINT pt);
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+        [DllImport("user32.dll")]
+        public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+        [DllImport("user32.dll")]
+        public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct LASTINPUTINFO { public int cbSize; public uint dwTime; }
+
+        [DllImport("user32.dll")]
+        public static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
+        [DllImport("user32.dll")]
+        public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint modifiers, uint vk);
+        [DllImport("user32.dll")]
+        public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr SetWindowsHookEx(int idHook, HookProc fn, IntPtr hMod, uint threadId);

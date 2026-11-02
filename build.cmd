@@ -13,5 +13,6 @@ set "WPF=%FW%\WPF"
   /resource:src\tray-off.ico,BetterWriting.tray-off.ico ^
   /resource:src\logo.png,BetterWriting.logo.png ^
   /resource:src\dict\ru.txt.gz,BetterWriting.dict.ru.txt.gz /resource:src\dict\en.txt.gz,BetterWriting.dict.en.txt.gz ^
+  /resource:src\hints\hint-brackets.gif,BetterWriting.hint-brackets.gif /resource:src\hints\hint-caps-lock.gif,BetterWriting.hint-caps-lock.gif /resource:src\hints\hint-double-space.gif,BetterWriting.hint-double-space.gif /resource:src\hints\hint-layout.gif,BetterWriting.hint-layout.gif /resource:src\hints\hint-punctuation.gif,BetterWriting.hint-punctuation.gif /resource:src\hints\hint-shortcuts.gif,BetterWriting.hint-shortcuts.gif ^
   src\*.cs || exit /b 1
 echo Done: BetterWriting.exe

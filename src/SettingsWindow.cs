@@ -130,6 +130,7 @@ namespace BetterWriting
             { "layout", "", "Keyboard layout", "Раскладка" },
             { "snippets", "", "Text shortcuts", "Быстрые вставки" },
             { "apps", "", "Apps", "Программы" },
+            { "tools", "\uE90F", "Tools", "Инструменты" },
             { "system", "", "System", "Система" },
         };
 
@@ -140,12 +141,20 @@ namespace BetterWriting
         readonly Dictionary<string, RadioButton> navButtons = new Dictionary<string, RadioButton>();
         readonly EventWaitHandle demoFocus;
         Config cfg;
-        bool loading, dark, mica;
+        bool loading, dark;
         string currentPage = "fix";
 
-        ItemsControl appChips, abbrevChips;
-        StackPanel snippetList, ruleList, speedRow;
-        RadioButton[] speedButtons, langButtons;
+        ItemsControl appChips, abbrevChips, layoutIgnoreChips;
+        StackPanel snippetList, ruleList, speedRow, correctionList;
+        StackPanel bracketRow, indicatorRow;
+        CheckBox awakeToggle;
+        ItemsControl appLayoutChips;
+        readonly List<Action> hotkeyRefresh = new List<Action>();
+        System.Windows.Controls.Primitives.Popup hintPopup;
+        Image hintImage;
+        DispatcherTimer hintTimer;
+        int hintSeq;
+        RadioButton[] speedButtons, langButtons, themeButtons, bracketButtons, indicatorButtons, awakeButtons;
         CheckBox autostart;
         TextBox snipTrigger, snipText;
         TextBlock snipTitle, snipError;
@@ -166,7 +175,8 @@ namespace BetterWriting
 
             demoFocus = new EventWaitHandle(false, EventResetMode.ManualReset, Program.DemoEventName);
 
-            dark = IsSystemDark();
+            Program.Theme = cfg.Theme;
+            dark = Program.IsDark();
             ApplyTheme();
             Window.Icon = BitmapFrame.Create(Resource("app.ico"));
             var logo = new BitmapImage();
@@ -184,6 +194,7 @@ namespace BetterWriting
                 Process.Start(Program.ExePath, "--background");
                 Later(800, UpdateStatus);
             };
+            Get<Button>("GithubLink").Click += delegate { Process.Start("https://github.com/Eastiwckgg/BetterWriting"); };
             Get<ItemsControl>("RunningApps").AddHandler(ButtonBase.ClickEvent, new RoutedEventHandler((s, e) =>
             {
                 var tag = TagOf(e);
@@ -238,6 +249,8 @@ namespace BetterWriting
             Get<Grid>("Pages").Children.Clear();
             Get<StackPanel>("Nav").Children.Clear();
             editingSnippet = null;
+            hotkeyRefresh.Clear();
+            HideHint();
             BuildUi();
             Refresh();
             ShowPage(currentPage);
@@ -263,12 +276,22 @@ namespace BetterWriting
             speedRow = new StackPanel();
             speedRow.Children.Add(FeatureRow("DoubleSpacePeriod", T("Period on double space", "Точка по двойному пробелу"),
                 T("Two quick spaces after a word insert a period and a space, like on iPhone",
-                  "Два быстрых пробела после слова ставят точку и пробел, как на iPhone")));
-            var speedLine = Row(null, T("How fast to press the spaces", "Насколько быстро нажимать пробелы"),
-                Themed(new Border { CornerRadius = new CornerRadius(6), Padding = new Thickness(2), BorderThickness = new Thickness(1), Child = speed },
-                       Border.BackgroundProperty, "ControlBg", Border.BorderBrushProperty, "ControlBorder"));
-            speedLine.Margin = new Thickness(16, 0, 16, 14);
-            speedRow.Children.Add(speedLine);
+                  "Два быстрых пробела после слова ставят точку и пробел, как на iPhone"), false, "hint-double-space"));
+            speedRow.Children.Add(SubRow(T("How fast to press the spaces", "Насколько быстро нажимать пробелы"), SegmentBox(speed)));
+
+            var bracketExit = new StackPanel { Orientation = Orientation.Horizontal };
+            bracketButtons = new[]
+            {
+                Segment(T("Hold Space", "Удержать пробел"), "bracket", () => SetBracketExit("hold")),
+                Segment(T("Two spaces", "Два пробела"), "bracket", () => SetBracketExit("double")),
+            };
+            foreach (var rb in bracketButtons) bracketExit.Children.Add(rb);
+            bracketRow = new StackPanel();
+            bracketRow.Children.Add(FeatureRow("AutoBrackets", T("Auto-close brackets and quotes", "Автоматические скобки и кавычки"),
+                T("Type “(” and “)” appears, with the cursor between them",
+                  "Вводите «(», и появляется «)», а курсор остаётся между ними"), false, "hint-brackets"));
+            bracketRow.Children.Add(SubRow(T("How to jump past the closing bracket, “(hello” → “(hello)”. Typing “)” always works too",
+                                             "Как выйти за закрывающую скобку, «(привет» → «(привет)». Ввести «)» можно всегда"), SegmentBox(bracketExit)));
 
             AddPage("fix",
                 Card(Padded(Stack(Txt(T("Try it here", "Попробуйте здесь"), "RowTitle"), Overlay(demo, demoHint, new Thickness(0, 10, 0, 0))))),
@@ -278,24 +301,28 @@ namespace BetterWriting
                      speedRow,
                      FeatureRow("AutoSpace", T("Spaces around punctuation", "Пробелы у знаков препинания"),
                          T("“hello ,world” → “hello, world”, “word(” → “word (”. Leaves links, numbers and abbreviations alone",
-                           "«привет ,как дела» → «привет, как дела», «слово(» → «слово (». Адреса сайтов, числа и сокращения не трогает")),
+                           "«привет ,как дела» → «привет, как дела», «слово(» → «слово (». Адреса сайтов, числа и сокращения не трогает"), false, "hint-punctuation"),
                      FeatureRow("AutoHyphen", T("Hyphens in Russian words", "Дефис в словах"),
                          T("“кое как” → “кое-как”, “что нибудь” → “что-нибудь”, “из за” → “из-за”",
                            "«кое как» → «кое-как», «что нибудь» → «что-нибудь», «из за» → «из-за»")),
                      FeatureRow("SmartQuotes", T("Russian quotes «»", "Кавычки-ёлочки"),
                          T("In the Russian layout \"text\" → «text». Quotes stay straight in the English layout",
-                           "В русской раскладке \"текст\" → «текст». В английской кавычки остаются обычными"))),
+                           "В русской раскладке \"текст\" → «текст». В английской кавычки остаются обычными")),
+                     bracketRow),
                 Section(T("Typos", "Опечатки")),
                 Card(FeatureRow("CapsLockFix", T("Accidental Caps Lock", "Случайный Caps Lock"),
-                         T("“hELLO” → “Hello”, and Caps Lock turns off", "«пРИВЕТ» → «Привет», и Caps Lock сам выключится")),
+                         T("“hELLO” → “Hello”, and Caps Lock turns off", "«пРИВЕТ» → «Привет», и Caps Lock сам выключится"), false, "hint-caps-lock"),
                      FeatureRow("Typos", T("Common mistakes", "Частые ошибки"),
                          T("“teh” → “the”, “definately” → “definitely”, “вообщем” → “в общем”",
                            "«вообщем» → «в общем», «извени» → «извини», «teh» → «the»")),
                      FeatureRow("EnglishI", T("“i” → “I” in English", "«i» → «I» в английском"),
                          T("“i think” → “I think”, “i'm” → “I'm”", "«i think» → «I think», «i'm» → «I'm»"))),
+                Section(T("Your corrections", "Ваши исправления")),
+                CorrectionsCard(),
                 Note(T("Any correction can be undone: press Backspace right after it.",
                        "Любую автозамену можно отменить: нажмите Backspace сразу после неё.")));
 
+            indicatorRow = new StackPanel();
             abbrevChips = Chips(name => { if (cfg.Abbreviations.Remove(name)) Save(); });
             var abbrevInput = new TextBox { Style = St("Input"), FontSize = 13 };
             var abbrevHint = Placeholder(T("New abbreviation, then Enter", "Новое сокращение и Enter"));
@@ -325,7 +352,9 @@ namespace BetterWriting
                            "После клика и стрелок программа читает текст перед курсором, чтобы не ставить заглавную посреди фразы"),
                          c => c.CapitalizeAfterClick, (c, v) => c.CapitalizeAfterClick = v, true),
                      ToggleRow(T("After an ellipsis", "После многоточия"), T("“Well... okay” or “Well... Okay”", "«Ну... ладно» или «Ну... Ладно»"),
-                         c => c.CapitalizeAfterEllipsis, (c, v) => c.CapitalizeAfterEllipsis = v)),
+                         c => c.CapitalizeAfterEllipsis, (c, v) => c.CapitalizeAfterEllipsis = v),
+                     ToggleRow(T("Inside brackets", "В скобках"), T("“word (like this)” → “word (Like this)”", "«слово (вот так)» → «слово (Вот так)»"),
+                         c => c.CapitalizeInBrackets, (c, v) => c.CapitalizeInBrackets = v)),
                 Section(T("Abbreviations", "Сокращения")),
                 Card(Padded(Stack(
                     Desc(T("A period after these does not end a sentence: “e.g. this” will not become “e.g. This”",
@@ -336,9 +365,15 @@ namespace BetterWriting
                 Card(FeatureRow("LayoutFix", T("Fix the keyboard layout", "Исправлять раскладку"),
                     T("Typed “ghbdtn” but meant “привет”? The app retypes the word and switches the layout for you. Works both ways: “руддщ” → “hello”. Needs both Russian and English layouts and keeps word lists in memory, about 1 MB",
                       "Набрали «ghbdtn», а хотели «привет»? Программа исправит слово и сама переключит раскладку. Работает в обе стороны: «руддщ» → «hello». Держит в памяти словари, около 1 МБ"),
-                    true)),
+                    true, "hint-layout")),
                 Note(T("Kicks in when a word is finished with Space or Enter. Backspace right after the fix brings back both the word and the layout.",
                        "Срабатывает, когда слово дописано и нажат пробел или Enter. Backspace сразу после исправления вернёт слово и раскладку.")),
+                Section(T("Never fix these words", "Не трогать эти слова")),
+                LayoutIgnoreCard(),
+                Section(T("Layout for each app", "Раскладка для каждой программы")),
+                AppLayoutsCard(),
+                Section(T("Indicator", "Индикатор")),
+                Card(indicatorRow),
                 Section(T("Languages", "Языки")),
                 Desc(T("BetterWriting works only in the checked keyboard layouts", "BetterWriting работает только в отмеченных раскладках"), 2, 8),
                 Card(ToggleRow(T("Russian", "Русский"), T("Also Ukrainian and Belarusian layouts", "А также украинская и белорусская раскладки"),
@@ -348,6 +383,20 @@ namespace BetterWriting
                          T("German, French and others: capitals, period on double space and punctuation spacing",
                            "Немецкий, французский и другие: заглавные, точка по двойному пробелу и пробелы у знаков"),
                          c => c.LangOther, (c, v) => c.LangOther = v)));
+
+            var indicatorSizes = new StackPanel { Orientation = Orientation.Horizontal };
+            indicatorButtons = new[]
+            {
+                Segment(T("Small", "Маленький"), "indicator", () => SetIndicatorSize("small")),
+                Segment(T("Medium", "Средний"), "indicator", () => SetIndicatorSize("medium")),
+                Segment(T("Large", "Большой"), "indicator", () => SetIndicatorSize("large")),
+            };
+            foreach (var rb in indicatorButtons) indicatorSizes.Children.Add(rb);
+            indicatorRow.Children.Add(ToggleRow(T("Show near the mouse", "Показывать у курсора мыши"),
+                T("When the layout or Caps Lock changes, “ENG”, “РУС” or “CAPS ON” appears for a second",
+                  "При смене раскладки или Caps Lock на секунду появляется «РУС», «ENG» или «CAPS ON»"),
+                c => c.LayoutIndicator, (c, v) => c.LayoutIndicator = v));
+            indicatorRow.Children.Add(SubRow(T("Size. It also follows the Windows display scale", "Размер. Также подстраивается под масштаб экрана в Windows"), SegmentBox(indicatorSizes)));
 
             snippetList = new StackPanel();
             snipTitle = Txt("", "Section");
@@ -360,6 +409,10 @@ namespace BetterWriting
             snipCancel = new Button { Style = St("Btn"), Content = T("Cancel", "Отмена"), Margin = new Thickness(8, 0, 0, 0), Visibility = Visibility.Collapsed };
             snipSave.Click += delegate { SaveSnippet(); };
             snipCancel.Click += delegate { EditSnippet(null); };
+            var tokens = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+            tokens.Children.Add(TokenButton(T("+ Date", "+ Дата"), "{date}"));
+            tokens.Children.Add(TokenButton(T("+ Time", "+ Время"), "{time}"));
+            tokens.Children.Add(TokenButton(T("+ Clipboard", "+ Буфер обмена"), "{clipboard}"));
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 12, 0, 0) };
             buttons.Children.Add(snipSave);
             buttons.Children.Add(snipCancel);
@@ -367,7 +420,7 @@ namespace BetterWriting
             AddPage("snippets",
                 Card(FeatureRow("Snippets", T("Text shortcuts", "Быстрые вставки"),
                     T("Type a shortcut and a space, and it turns into the full text. For example, “brb” → “be right back”",
-                      "Напишите сокращение и пробел, и оно превратится в полный текст. Например, «спс» → «спасибо»"))),
+                      "Напишите сокращение и пробел, и оно превратится в полный текст. Например, «спс» → «спасибо»"), false, "hint-shortcuts")),
                 Section(T("Your shortcuts", "Ваши вставки")),
                 Card(snippetList),
                 snipTitle,
@@ -378,6 +431,9 @@ namespace BetterWriting
                     Txt(T("Text", "Текст"), "RowTitle"),
                     Desc(T("Line breaks are kept. If the shortcut starts with a capital, the text does too",
                            "Переносы строк сохраняются. Если сокращение написано с заглавной, текст тоже начнётся с заглавной"), 0, 6), snipText,
+                    tokens,
+                    Desc(T("These buttons add a value that is filled in at the moment you type the shortcut. For example, the text “Today is {date}” turns into “Today is 02.11.2026”",
+                           "Эти кнопки добавляют значение, которое подставится в момент ввода сокращения. Например, текст «Сегодня {date}» превратится в «Сегодня 02.11.2026»"), 0, 0, true),
                     snipError, buttons))));
             EditSnippet(null);
 
@@ -429,8 +485,16 @@ namespace BetterWriting
                 Segment("Русский", "lang", () => SetLanguage("ru")),
             };
             foreach (var rb in langButtons) langs.Children.Add(rb);
-            var langBox = Themed(new Border { CornerRadius = new CornerRadius(6), Padding = new Thickness(2), BorderThickness = new Thickness(1), Child = langs },
-                                 Border.BackgroundProperty, "ControlBg", Border.BorderBrushProperty, "ControlBorder");
+            var langBox = SegmentBox(langs);
+
+            var themes = new StackPanel { Orientation = Orientation.Horizontal };
+            themeButtons = new[]
+            {
+                Segment(T("Dark", "Тёмная"), "theme", () => SetTheme("dark")),
+                Segment(T("Light", "Светлая"), "theme", () => SetTheme("light")),
+                Segment(T("Same as Windows", "Как в Windows"), "theme", () => SetTheme("system")),
+            };
+            foreach (var rb in themeButtons) themes.Children.Add(rb);
 
             var openIni = new Button { Style = St("Link"), Content = T("Open the settings file", "Открыть файл настроек") };
             openIni.Click += delegate { Process.Start("notepad.exe", "\"" + Program.ConfigPath + "\""); };
@@ -444,10 +508,58 @@ namespace BetterWriting
             links.Children.Add(openIni);
             links.Children.Add(quit);
 
+            var awakeTimes = new StackPanel { Orientation = Orientation.Horizontal };
+            awakeButtons = new[]
+            {
+                Segment(T("1 hour", "1 час"), "awake", () => SetAwakeHours(1)),
+                Segment(T("3 hours", "3 часа"), "awake", () => SetAwakeHours(3)),
+                Segment(T("Until I turn it off", "Пока не выключу"), "awake", () => SetAwakeHours(0)),
+            };
+            foreach (var rb in awakeButtons) awakeTimes.Children.Add(rb);
+            awakeToggle = new CheckBox { Style = St("Toggle") };
+            RoutedEventHandler onAwake = delegate
+            {
+                if (loading) return;
+                if (awakeToggle.IsChecked == true) cfg.StartKeepAwake(DateTime.Now);
+                else cfg.KeepAwakeUntil = "";
+                Save();
+            };
+            awakeToggle.Checked += onAwake;
+            awakeToggle.Unchecked += onAwake;
+
+            AddPage("tools",
+                FirstSection(T("Stay awake", "Не засыпать")),
+                Card(Row(T("Keep the computer awake", "Не давать компьютеру заснуть"),
+                         T("For long downloads and renders. Windows power settings do not change. Closing a laptop lid or choosing Sleep yourself still works",
+                           "Для долгих загрузок и рендера. Настройки питания Windows не меняются. Закрыть крышку ноутбука или усыпить компьютер вручную всё равно можно"), awakeToggle),
+                     Row(T("For how long", "На какое время"), null, SegmentBox(awakeTimes)),
+                     ToggleRow(T("Keep the screen on", "Не гасить экран"), T("Otherwise the screen turns off as usual and only the computer stays awake", "Иначе экран погаснет как обычно, а компьютер продолжит работать"),
+                         c => c.KeepAwakeScreen, (c, v) => c.KeepAwakeScreen = v),
+                     HotkeyRow(T("Hotkey", "Горячая клавиша"),
+                         T("Turns it on for the chosen time or turns it off. Empty by default", "Включает на выбранное время или выключает. По умолчанию не задана"),
+                         c => c.KeepAwakeHotkey, (c, v) => c.KeepAwakeHotkey = v)),
+                Section(T("Always on top", "Поверх всех окон")),
+                Card(ToggleRow(T("Button on the title bar", "Кнопка на заголовке окна"),
+                         T("Right-click a window's title bar, and a “Keep on top” button appears above the cursor",
+                           "Нажмите правой кнопкой на заголовок окна, и над курсором появится кнопка «Поверх всех окон»"),
+                         c => c.PinOnTitleBar, (c, v) => c.PinOnTitleBar = v),
+                     HotkeyRow(T("Hotkey", "Горячая клавиша"),
+                         T("Pins the active window or unpins it. Empty by default", "Закрепляет активное окно или открепляет его. По умолчанию не задана"),
+                         c => c.PinHotkey, (c, v) => c.PinHotkey = v)),
+                Section(T("Paste without formatting", "Вставка без форматирования")),
+                Card(HotkeyRow(T("Hotkey", "Горячая клавиша"),
+                    T("Pastes only the text, without fonts and colors. After that the clipboard holds only the text as well. Empty by default",
+                      "Вставляет только текст, без шрифтов и цветов. После этого и в буфере обмена остаётся только текст. По умолчанию не задана"),
+                    c => c.PlainPasteHotkey, (c, v) => c.PlainPasteHotkey = v)));
+
             AddPage("system",
-                Card(Row(T("Language", "Язык"), T("Language of this window and the tray menu", "Язык этого окна и меню в трее"), langBox),
+                Card(Row(T("Theme", "Тема"), T("Colors of this window, the tray menu and the indicator", "Цвета этого окна, меню в трее и индикатора"), SegmentBox(themes)),
+                     Row(T("Language", "Язык"), T("Language of this window and the tray menu", "Язык этого окна и меню в трее"), langBox),
                      Row(T("Start with Windows", "Запускать вместе с Windows"),
                          T("The app starts quietly in the tray when you sign in", "Программа тихо стартует в трее при входе в систему"), autostart),
+                     HotkeyRow(T("Pause hotkey", "Горячая клавиша паузы"),
+                         T("Click the field and press a combination. Backspace removes it", "Нажмите на поле и затем сочетание клавиш. Backspace убирает его"),
+                         c => c.PauseHotkey, (c, v) => c.PauseHotkey = v),
                      ToggleRow(T("Ignore input from other programs", "Не реагировать на ввод других программ"),
                          T("Text typed by AutoHotkey, Punto Switcher and similar tools is left alone",
                            "Текст, который печатают AutoHotkey, Punto Switcher и подобные, не исправляется"),
@@ -502,6 +614,7 @@ namespace BetterWriting
                 case "AutoSpace": return T("Punctuation spacing", "Пробелы у знаков");
                 case "AutoHyphen": return T("Hyphens", "Дефисы");
                 case "SmartQuotes": return T("Quotes «»", "Кавычки");
+                case "AutoBrackets": return T("Auto brackets", "Автоскобки");
                 case "CapsLockFix": return "Caps Lock";
                 case "Typos": return T("Typos", "Опечатки");
                 case "EnglishI": return T("“I” in English", "«I» в английском");
@@ -534,7 +647,13 @@ namespace BetterWriting
                 autostart.IsChecked = Program.IsAutostart();
                 int ms = cfg.DoubleSpaceIntervalMs;
                 speedButtons[ms < 500 ? 0 : ms < 750 ? 1 : 2].IsChecked = true;
+                bracketButtons[cfg.BracketExit == "hold" ? 1 : cfg.BracketExit == "double" ? 2 : 0].IsChecked = true;
+                indicatorButtons[cfg.IndicatorSize == "large" ? 2 : cfg.IndicatorSize == "medium" ? 1 : 0].IsChecked = true;
+                awakeButtons[cfg.KeepAwakeHours == 1 ? 0 : cfg.KeepAwakeHours == 3 ? 1 : 2].IsChecked = true;
+                awakeToggle.IsChecked = cfg.KeepAwakeActive(DateTime.Now);
                 langButtons[cfg.UiLanguage == "ru" ? 1 : 0].IsChecked = true;
+                themeButtons[cfg.Theme == "light" ? 1 : cfg.Theme == "system" ? 2 : 0].IsChecked = true;
+                SyncTheme();
                 RefreshDependent();
             }
             finally { loading = false; }
@@ -550,10 +669,15 @@ namespace BetterWriting
         {
             appChips.ItemsSource = cfg.ExcludeApps.OrderBy(a => a, StringComparer.CurrentCultureIgnoreCase).ToList();
             abbrevChips.ItemsSource = cfg.Abbreviations.OrderBy(a => a, StringComparer.CurrentCultureIgnoreCase).ToList();
-            var speedLine = speedRow.Children[1] as UIElement;
-            speedLine.IsEnabled = cfg.DoubleSpacePeriod;
-            speedLine.Opacity = cfg.DoubleSpacePeriod ? 1 : 0.45;
+            Dim(speedRow, cfg.DoubleSpacePeriod);
+            Dim(bracketRow, cfg.AutoBrackets);
+            Dim(indicatorRow, cfg.LayoutIndicator);
             Get<TextBlock>("EnabledLabel").Text = cfg.Enabled ? T("On", "Включено") : T("Paused", "На паузе");
+            layoutIgnoreChips.ItemsSource = cfg.LayoutIgnore.OrderBy(a => a, StringComparer.CurrentCultureIgnoreCase).ToList();
+            appLayoutChips.ItemsSource = cfg.AppLayouts.OrderBy(a => a.Key, StringComparer.CurrentCultureIgnoreCase)
+                .Select(a => a.Key + " · " + LayoutLabel(a.Value)).ToList();
+            foreach (var refresh in hotkeyRefresh) refresh();
+            RebuildPairs(correctionList, cfg.CustomTypos, k => k);
             RebuildSnippets();
             RebuildRules();
             UpdateStatus();
@@ -571,6 +695,60 @@ namespace BetterWriting
             if (loading) return;
             cfg.DoubleSpaceIntervalMs = ms;
             Save();
+        }
+
+        void SetTheme(string theme)
+        {
+            cfg.Theme = theme;
+            Save();
+            SyncTheme();
+        }
+
+        void SyncTheme()
+        {
+            Program.Theme = cfg.Theme;
+            bool now = Program.IsDark();
+            if (now == dark) return;
+            dark = now;
+            ApplyBackdrop();
+        }
+
+        Button TokenButton(string label, string token)
+        {
+            var button = new Button { Style = St("Btn"), Content = label, Margin = new Thickness(0, 0, 6, 0), ToolTip = token };
+            button.Click += delegate
+            {
+                snipText.SelectedText = token;
+                snipText.CaretIndex = snipText.SelectionStart + token.Length;
+                snipText.Focus();
+            };
+            return button;
+        }
+
+        void SetBracketExit(string mode)
+        {
+            cfg.BracketExit = mode;
+            Save();
+        }
+
+        void SetIndicatorSize(string size)
+        {
+            cfg.IndicatorSize = size;
+            Save();
+        }
+
+        void SetAwakeHours(int hours)
+        {
+            cfg.KeepAwakeHours = hours;
+            if (cfg.KeepAwakeActive(DateTime.Now)) cfg.StartKeepAwake(DateTime.Now);
+            Save();
+        }
+
+        static void Dim(StackPanel row, bool on)
+        {
+            var line = row.Children[1];
+            line.IsEnabled = on;
+            line.Opacity = on ? 1 : 0.45;
         }
 
         void SetLanguage(string lang)
@@ -599,6 +777,214 @@ namespace BetterWriting
             }
             Get<StackPanel>("StatusLine").Visibility = running && cfg.Enabled ? Visibility.Collapsed : Visibility.Visible;
             Get<Button>("StartButton").Visibility = running ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        Border CorrectionsCard()
+        {
+            correctionList = new StackPanel();
+            return PairCard(correctionList, T("Wrong", "Как ошибаетесь"), T("Right", "Как правильно"),
+                T("Add your own typical mistakes. Capitals are kept: “Teh” → “The”",
+                  "Добавьте свои типичные ошибки. Заглавная сохраняется: «Извени» → «Извини»"),
+                (w, r) =>
+                {
+                    if (w.Length == 0 || !w.All(c => char.IsLetter(c) || c == '\'' || c == '’' || c == '-'))
+                        return T("The wrong spelling must be one word, letters only", "Ошибка должна быть одним словом, только из букв");
+                    if (r.Length == 0) return T("Type the right spelling", "Напишите, как правильно");
+                    cfg.CustomTypos[w] = r;
+                    return null;
+                });
+        }
+
+        Border PairCard(StackPanel list, string leftHintText, string rightHintText, string description, Func<string, string, string> tryAdd)
+        {
+            var left = new TextBox { Style = St("Input"), FontSize = 13 };
+            var leftHint = Placeholder(leftHintText);
+            left.TextChanged += delegate { leftHint.Visibility = left.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed; };
+            var right = new TextBox { Style = St("Input"), FontSize = 13 };
+            var rightHint = Placeholder(rightHintText);
+            right.TextChanged += delegate { rightHint.Visibility = right.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed; };
+            var error = Desc("", 0, 0);
+            error.Foreground = Brush("#E5534B");
+            error.Margin = new Thickness(0, 8, 0, 0);
+            error.Visibility = Visibility.Collapsed;
+            var add = new Button { Style = St("AccentBtn"), Content = T("Add", "Добавить"), Padding = new Thickness(18, 6, 18, 6) };
+
+            Action commit = () =>
+            {
+                string message = tryAdd(left.Text.Trim(), right.Text.Trim());
+                error.Text = message ?? "";
+                error.Visibility = message == null ? Visibility.Collapsed : Visibility.Visible;
+                if (message != null) return;
+                left.Clear();
+                right.Clear();
+                left.Focus();
+                Save();
+            };
+            add.Click += delegate { commit(); };
+            KeyEventHandler onEnter = (s, e) =>
+            {
+                if (e.Key != Key.Enter) return;
+                commit();
+                e.Handled = true;
+            };
+            left.KeyDown += onEnter;
+            right.KeyDown += onEnter;
+
+            var form = new Grid();
+            form.ColumnDefinitions.Add(new ColumnDefinition());
+            form.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            form.ColumnDefinitions.Add(new ColumnDefinition());
+            form.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var leftBox = Overlay(left, leftHint, new Thickness(0));
+            var arrow = Themed(new TextBlock { Text = "→", Margin = new Thickness(12, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center },
+                               TextBlock.ForegroundProperty, "TextSecondary");
+            var rightBox = Overlay(right, rightHint, new Thickness(0));
+            add.Margin = new Thickness(12, 0, 0, 0);
+            Grid.SetColumn(arrow, 1);
+            Grid.SetColumn(rightBox, 2);
+            Grid.SetColumn(add, 3);
+            form.Children.Add(leftBox);
+            form.Children.Add(arrow);
+            form.Children.Add(rightBox);
+            form.Children.Add(add);
+
+            return Card(list, Padded(Stack(Desc(description, 0, 10), form, error)));
+        }
+
+        void RebuildPairs(StackPanel list, Dictionary<string, string> pairs, Func<string, string> show)
+        {
+            list.Children.Clear();
+            if (pairs.Count == 0)
+            {
+                list.Children.Add(Padded(Desc(T("Nothing here yet.", "Пока пусто."), 0, 0)));
+                return;
+            }
+            bool first = true;
+            foreach (var pair in pairs.OrderBy(p => p.Key, StringComparer.CurrentCultureIgnoreCase))
+            {
+                if (!first) list.Children.Add(new Border { Style = St("Divider") });
+                first = false;
+                string key = pair.Key;
+                var grid = new Grid { Margin = new Thickness(16, 7, 12, 7) };
+                grid.ColumnDefinitions.Add(new ColumnDefinition());
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                grid.Children.Add(new TextBlock { Text = show(key) + "  →  " + pair.Value, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center });
+                var del = new Button { Style = St("IconBtn"), ToolTip = T("Delete", "Удалить"), VerticalAlignment = VerticalAlignment.Center };
+                del.Click += delegate
+                {
+                    pairs.Remove(key);
+                    Save();
+                };
+                Grid.SetColumn(del, 1);
+                grid.Children.Add(del);
+                list.Children.Add(grid);
+            }
+        }
+
+        Border AppLayoutsCard()
+        {
+            appLayoutChips = Chips(text =>
+            {
+                int at = text.IndexOf(" · ", StringComparison.Ordinal);
+                if (at > 0 && cfg.AppLayouts.Remove(text.Substring(0, at))) Save();
+            });
+            return Card(ToggleRow(T("Remember the layout for each app", "Запоминать раскладку для каждой программы"),
+                    T("The layout you last typed with in an app comes back when you return to it",
+                      "Раскладка, на которой вы печатали в программе, возвращается, когда вы снова в неё переходите"),
+                    c => c.LayoutPerApp, (c, v) => c.LayoutPerApp = v),
+                Padded(Stack(Desc(T("Remembered so far. Remove an app to make the program forget its layout",
+                                    "Уже запомнено. Уберите программу, чтобы её раскладка забылась"), 0, 10), appLayoutChips)));
+        }
+
+        static string LayoutLabel(string id)
+        {
+            int lang;
+            return int.TryParse(id, System.Globalization.NumberStyles.HexNumber, null, out lang) ? Hooks.LangLabel(lang) : id;
+        }
+
+        Border LayoutIgnoreCard()
+        {
+            layoutIgnoreChips = Chips(name => { if (cfg.LayoutIgnore.Remove(name)) Save(); });
+            var input = new TextBox { Style = St("Input"), FontSize = 13 };
+            var hint = Placeholder(T("New word, then Enter", "Новое слово и Enter"));
+            input.TextChanged += delegate { hint.Visibility = input.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed; };
+            input.KeyDown += (s, e) =>
+            {
+                if (e.Key != Key.Enter) return;
+                string word = input.Text.Trim().ToLowerInvariant();
+                input.Clear();
+                if (word.Length > 0 && cfg.LayoutIgnore.Add(word)) Save();
+                e.Handled = true;
+            };
+            var box = Overlay(input, hint, new Thickness(0, 4, 0, 0));
+            box.Width = 280;
+            box.HorizontalAlignment = HorizontalAlignment.Left;
+            return Card(Padded(Stack(
+                Desc(T("Nicknames, brands and other words the layout fix should leave alone, as you type them",
+                       "Ники, названия и другие слова, которые исправление раскладки не должно менять. Пишите их так, как набираете"), 0, 12),
+                layoutIgnoreChips, box)));
+        }
+
+        UIElement HotkeyRow(string title, string description, Func<Config, string> get, Action<Config, string> set)
+        {
+            var box = new TextBox
+            {
+                Style = St("Input"), FontSize = 13, Width = 170, IsReadOnly = true,
+                IsReadOnlyCaretVisible = false, TextAlignment = TextAlignment.Center
+            };
+            var error = Desc("", 16, 12);
+            error.Foreground = Brush("#E5534B");
+            error.Visibility = Visibility.Collapsed;
+            box.PreviewKeyDown += (s, e) => OnHotkeyKey(e, error, get, set);
+            hotkeyRefresh.Add(() => box.Text = string.IsNullOrEmpty(get(cfg)) ? T("None", "Нет") : get(cfg));
+            return Stack(Row(title, description, box), error);
+        }
+
+        void OnHotkeyKey(KeyEventArgs e, TextBlock errorText, Func<Config, string> get, Action<Config, string> set)
+        {
+            Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+            if (key == Key.Tab) return;
+            e.Handled = true;
+            if (key == Key.LeftCtrl || key == Key.RightCtrl || key == Key.LeftAlt || key == Key.RightAlt
+                || key == Key.LeftShift || key == Key.RightShift || key == Key.LWin || key == Key.RWin) return;
+
+            errorText.Visibility = Visibility.Collapsed;
+            var mods = Keyboard.Modifiers;
+            if (mods == ModifierKeys.None && key == Key.Escape)
+            {
+                Keyboard.ClearFocus();
+                return;
+            }
+            if (mods == ModifierKeys.None && (key == Key.Back || key == Key.Delete))
+            {
+                set(cfg, "");
+                Save();
+                return;
+            }
+
+            string text = Hotkey.Format((mods & ModifierKeys.Control) != 0, (mods & ModifierKeys.Alt) != 0,
+                (mods & ModifierKeys.Shift) != 0, (mods & ModifierKeys.Windows) != 0, KeyInterop.VirtualKeyFromKey(key));
+            string error = text == null ? T("Use Ctrl, Alt or Win with a letter, a digit or an F key", "Нужен Ctrl, Alt или Win вместе с буквой, цифрой или клавишей F")
+                : text != get(cfg) && !HotkeyFree(text) ? T("This combination is already taken", "Это сочетание уже занято")
+                : null;
+            if (error != null)
+            {
+                errorText.Text = error;
+                errorText.Visibility = Visibility.Visible;
+                return;
+            }
+            set(cfg, text);
+            Save();
+        }
+
+        bool HotkeyFree(string text)
+        {
+            uint mods, vk;
+            if (!Hotkey.TryParse(text, out mods, out vk)) return false;
+            IntPtr hwnd = new WindowInteropHelper(Window).Handle;
+            if (!Native.RegisterHotKey(hwnd, 77, mods, vk)) return false;
+            Native.UnregisterHotKey(hwnd, 77);
+            return true;
         }
 
         void RebuildSnippets()
@@ -783,19 +1169,119 @@ namespace BetterWriting
             }
         }
 
-        Grid FeatureRow(string feature, string title, string desc, bool load = false)
+        Grid FeatureRow(string feature, string title, string desc, bool load = false, string hint = null)
         {
-            return ToggleRow(title, desc, c => c.GetFeature(feature), (c, v) => c.SetFeature(feature, v), load);
+            return ToggleRow(title, desc, c => c.GetFeature(feature), (c, v) => c.SetFeature(feature, v), load, hint);
         }
 
-        Grid ToggleRow(string title, string desc, Func<Config, bool> get, Action<Config, bool> set, bool load = false)
+        Grid ToggleRow(string title, string desc, Func<Config, bool> get, Action<Config, bool> set, bool load = false, string hint = null)
         {
             var cb = new CheckBox { Style = St("Toggle") };
             BindCheck(cb, get, set);
-            return Row(title, desc, cb, load);
+            return Row(title, desc, cb, load, hint);
         }
 
-        Grid Row(string title, string desc, UIElement right, bool load = false)
+        UIElement InfoIcon(string hint)
+        {
+            var icon = Themed(new TextBlock
+            {
+                Text = "\uE946", FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"), FontSize = 14,
+                Margin = new Thickness(8, 2, 0, 0), VerticalAlignment = VerticalAlignment.Center, Cursor = Cursors.Help
+            }, TextBlock.ForegroundProperty, "TextSecondary");
+            icon.MouseEnter += delegate { ShowHint(icon, hint); };
+            icon.MouseLeave += delegate { HideHint(); };
+            return icon;
+        }
+
+        sealed class HintFrame
+        {
+            public BitmapSource Image;
+            public int DelayMs;
+        }
+
+        async void ShowHint(UIElement anchor, string name)
+        {
+            int seq = ++hintSeq;
+            await Task.Delay(180);
+            if (seq != hintSeq) return;
+            var frames = await Task.Run(() => LoadHint(name));
+            if (seq != hintSeq || frames.Count == 0) return;
+
+            if (hintPopup == null)
+            {
+                hintImage = new Image { Stretch = Stretch.Fill };
+                RenderOptions.SetBitmapScalingMode(hintImage, BitmapScalingMode.HighQuality);
+                hintPopup = new System.Windows.Controls.Primitives.Popup
+                {
+                    AllowsTransparency = true, Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom, IsHitTestVisible = false,
+                    Child = new Border
+                    {
+                        CornerRadius = new CornerRadius(8), Margin = new Thickness(6, 6, 6, 12), ClipToBounds = true, Child = hintImage,
+                        Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 16, ShadowDepth = 3, Opacity = 0.35 }
+                    }
+                };
+            }
+            hintImage.Width = 320;
+            hintImage.Height = 320.0 * frames[0].Image.PixelHeight / frames[0].Image.PixelWidth;
+            int at = 0;
+            hintImage.Source = frames[0].Image;
+            hintPopup.PlacementTarget = anchor;
+            hintPopup.IsOpen = true;
+            if (hintTimer != null) hintTimer.Stop();
+            hintTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(frames[0].DelayMs) };
+            hintTimer.Tick += delegate
+            {
+                at = (at + 1) % frames.Count;
+                hintImage.Source = frames[at].Image;
+                hintTimer.Interval = TimeSpan.FromMilliseconds(frames[at].DelayMs);
+            };
+            hintTimer.Start();
+        }
+
+        void HideHint()
+        {
+            hintSeq++;
+            if (hintTimer != null)
+            {
+                hintTimer.Stop();
+                hintTimer = null;
+            }
+            if (hintPopup != null) hintPopup.IsOpen = false;
+            if (hintImage != null) hintImage.Source = null;
+        }
+
+        static List<HintFrame> LoadHint(string name)
+        {
+            var frames = new List<HintFrame>();
+            using (var stream = Resource(name + ".gif"))
+            using (var gif = System.Drawing.Image.FromStream(stream))
+            {
+                var dimension = new System.Drawing.Imaging.FrameDimension(gif.FrameDimensionsList[0]);
+                int count = gif.GetFrameCount(dimension);
+                byte[] delays = gif.GetPropertyItem(0x5100).Value;
+                for (int i = 0; i < count; i++)
+                {
+                    gif.SelectActiveFrame(dimension, i);
+                    using (var bmp = new System.Drawing.Bitmap(gif))
+                    {
+                        IntPtr handle = bmp.GetHbitmap();
+                        try
+                        {
+                            var source = Imaging.CreateBitmapSourceFromHBitmap(handle, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+                            source.Freeze();
+                            frames.Add(new HintFrame { Image = source, DelayMs = Math.Max(20, BitConverter.ToInt32(delays, i * 4) * 10) });
+                        }
+                        finally { DeleteObject(handle); }
+                    }
+                }
+            }
+            return frames;
+        }
+
+        [DllImport("gdi32.dll")]
+        static extern bool DeleteObject(IntPtr handle);
+
+        Grid Row(string title, string desc, UIElement right, bool load = false, string hint = null)
         {
             var grid = new Grid { Margin = new Thickness(16, 13, 16, 13) };
             grid.ColumnDefinitions.Add(new ColumnDefinition());
@@ -813,6 +1299,7 @@ namespace BetterWriting
                                     "Эта функция немного нагружает систему. Если компьютер слабый, её можно выключить"),
                         Child = new TextBlock { Text = T("Extra load", "Нагрузка"), Style = St("LoadBadgeText") }
                     });
+                if (hint != null && HasResource(hint + ".gif")) line.Children.Add(InfoIcon(hint));
                 left.Children.Add(line);
             }
             if (desc != null) left.Children.Add(Desc(desc, 0, 0, title != null));
@@ -822,6 +1309,19 @@ namespace BetterWriting
             Grid.SetColumn(right, 1);
             grid.Children.Add(right);
             return grid;
+        }
+
+        Border SegmentBox(UIElement content)
+        {
+            return Themed(new Border { CornerRadius = new CornerRadius(6), Padding = new Thickness(2), BorderThickness = new Thickness(1), Child = content },
+                          Border.BackgroundProperty, "ControlBg", Border.BorderBrushProperty, "ControlBorder");
+        }
+
+        Grid SubRow(string text, UIElement right)
+        {
+            var row = Row(null, text, right);
+            row.Margin = new Thickness(16, 0, 16, 14);
+            return row;
         }
 
         RadioButton Segment(string text, string group, Action onChecked)
@@ -924,11 +1424,7 @@ namespace BetterWriting
         {
             Window.Dispatcher.BeginInvoke(new Action(() =>
             {
-                bool now = IsSystemDark();
-                if (now == dark) return;
-                dark = now;
-                ApplyBackdrop();
-                ApplyTheme();
+                SyncTheme();
             }));
         }
 
@@ -937,14 +1433,8 @@ namespace BetterWriting
             IntPtr hwnd = new WindowInteropHelper(Window).Handle;
             int on = dark ? 1 : 0;
             DwmSetWindowAttribute(hwnd, 20, ref on, 4);
-            int backdrop = 2;
-            mica = Environment.OSVersion.Version.Build >= 22621 && DwmSetWindowAttribute(hwnd, 38, ref backdrop, 4) == 0;
-            if (mica)
-            {
-                HwndSource.FromHwnd(hwnd).CompositionTarget.BackgroundColor = Colors.Transparent;
-                var margins = new MARGINS { Left = -1, Right = -1, Top = -1, Bottom = -1 };
-                DwmExtendFrameIntoClientArea(hwnd, ref margins);
-            }
+            int caption = dark ? 0x00202020 : 0x00F3F3F3;
+            DwmSetWindowAttribute(hwnd, 35, ref caption, 4);
             ApplyTheme();
         }
 
@@ -953,72 +1443,63 @@ namespace BetterWriting
             var r = Window.Resources;
             if (dark)
             {
-                r["WindowBg"] = mica ? Brushes.Transparent : Brush("#202020");
-                r["CardBg"] = Brush(mica ? "#0DFFFFFF" : "#2B2B2B");
+                r["WindowBg"] = Brush("#202020");
+                r["CardBg"] = Brush("#2B2B2B");
                 r["CardBorder"] = Brush("#19000000");
                 r["DividerBrush"] = Brush("#14FFFFFF");
-                r["Text"] = Brush("#FFFFFF");
-                r["TextSecondary"] = Brush("#C5FFFFFF");
-                r["TextTertiary"] = Brush("#87FFFFFF");
+                r["Text"] = Brush("#F2F2F2");
+                r["TextSecondary"] = Brush("#B8FFFFFF");
+                r["TextTertiary"] = Brush("#80FFFFFF");
                 r["ControlBg"] = Brush("#0FFFFFFF");
                 r["ControlHover"] = Brush("#18FFFFFF");
-                r["ControlBorder"] = Brush("#17FFFFFF");
+                r["ControlBorder"] = Brush("#1CFFFFFF");
                 r["NavSelected"] = Brush("#14FFFFFF");
                 r["InputBg"] = Brush("#0BFFFFFF");
-                r["InputFocusBg"] = Brush(mica ? "#B31C1C1C" : "#1F1F1F");
-                r["SegmentOn"] = Brush("#1FFFFFFF");
+                r["InputFocusBg"] = Brush("#1F1F1F");
+                r["SegmentOn"] = Brush("#22FFFFFF");
                 r["ChipBg"] = Brush("#0FFFFFFF");
-                r["ChipOn"] = Brush("#269B5CFF");
-                r["ChipOnBorder"] = Brush("#809B5CFF");
+                r["ChipOn"] = Brush("#22FFFFFF");
+                r["ChipOnBorder"] = Brush("#70FFFFFF");
                 r["PopupBg"] = Brush("#2C2C2C");
                 r["ToggleOffBorder"] = Brush("#9AFFFFFF");
                 r["ToggleOffFill"] = Brush("#08FFFFFF");
                 r["ToggleOffThumb"] = Brush("#CFFFFFFF");
-                r["Accent"] = Brush("#9B5CFF");
-                r["AccentThumb"] = Brush("#FFFFFF");
-                r["AccentLink"] = Brush("#C4A1FF");
+                r["Accent"] = Brush("#E6E6E6");
+                r["AccentThumb"] = Brush("#1F1F1F");
+                r["AccentLink"] = Brush("#D6D6D6");
                 r["BadgeBg"] = Brush("#26FFB347");
                 r["BadgeText"] = Brush("#FFC97A");
                 r["ScrollThumb"] = Brush("#55FFFFFF");
             }
             else
             {
-                r["WindowBg"] = mica ? Brushes.Transparent : Brush("#F3F3F3");
-                r["CardBg"] = Brush(mica ? "#B3FFFFFF" : "#FFFFFF");
+                r["WindowBg"] = Brush("#F3F3F3");
+                r["CardBg"] = Brush("#FFFFFF");
                 r["CardBorder"] = Brush("#0F000000");
                 r["DividerBrush"] = Brush("#0F000000");
-                r["Text"] = Brush("#E4000000");
-                r["TextSecondary"] = Brush("#9E000000");
-                r["TextTertiary"] = Brush("#72000000");
+                r["Text"] = Brush("#1F1F1F");
+                r["TextSecondary"] = Brush("#A6000000");
+                r["TextTertiary"] = Brush("#78000000");
                 r["ControlBg"] = Brush("#B3FFFFFF");
                 r["ControlHover"] = Brush("#0A000000");
                 r["ControlBorder"] = Brush("#1F000000");
                 r["NavSelected"] = Brush("#0F000000");
                 r["InputBg"] = Brush("#B3FFFFFF");
                 r["InputFocusBg"] = Brush("#FFFFFF");
-                r["SegmentOn"] = Brush("#FFFFFF");
+                r["SegmentOn"] = Brush("#17000000");
                 r["ChipBg"] = Brush("#0A000000");
-                r["ChipOn"] = Brush("#1A7C2EEA");
-                r["ChipOnBorder"] = Brush("#807C2EEA");
+                r["ChipOn"] = Brush("#14000000");
+                r["ChipOnBorder"] = Brush("#70000000");
                 r["PopupBg"] = Brush("#F9F9F9");
                 r["ToggleOffBorder"] = Brush("#9E000000");
                 r["ToggleOffFill"] = Brush("#05000000");
                 r["ToggleOffThumb"] = Brush("#C2000000");
-                r["Accent"] = Brush("#7C2EEA");
+                r["Accent"] = Brush("#2B2B2B");
                 r["AccentThumb"] = Brush("#FFFFFF");
-                r["AccentLink"] = Brush("#6A1FD6");
+                r["AccentLink"] = Brush("#2B2B2B");
                 r["BadgeBg"] = Brush("#1FE08A00");
                 r["BadgeText"] = Brush("#9A5A00");
                 r["ScrollThumb"] = Brush("#5A000000");
-            }
-        }
-
-        static bool IsSystemDark()
-        {
-            using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
-            {
-                object v = key == null ? null : key.GetValue("AppsUseLightTheme");
-                return v is int && (int)v == 0;
             }
         }
 
@@ -1042,6 +1523,11 @@ namespace BetterWriting
             return Assembly.GetExecutingAssembly().GetManifestResourceStream("BetterWriting." + name);
         }
 
+        static bool HasResource(string name)
+        {
+            return Assembly.GetExecutingAssembly().GetManifestResourceInfo("BetterWriting." + name) != null;
+        }
+
         void Later(int ms, Action action)
         {
             var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(ms) };
@@ -1049,12 +1535,7 @@ namespace BetterWriting
             t.Start();
         }
 
-        [StructLayout(LayoutKind.Sequential)]
-        struct MARGINS { public int Left, Right, Top, Bottom; }
-
         [DllImport("dwmapi.dll")]
         static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
-        [DllImport("dwmapi.dll")]
-        static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref MARGINS margins);
     }
 }
